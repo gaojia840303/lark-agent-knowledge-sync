@@ -1,0 +1,63 @@
+agent:
+  id: your-agent-id
+  name: 待配置
+  owner: 待配置
+
+knowledge:
+  wiki_space_id: 待配置
+  public_folder_token: 待配置
+  private_folder_token: 待配置
+  public_document_token: 待配置
+  private_document_token: 待配置
+
+sources:
+  meetings:
+    keywords: []
+    minutes_keywords: []
+    participant_ids: []
+    owner_ids: []
+    minute_tokens: []
+    target_scope: private
+    knowledge_mode: stable
+  documents:
+    document_tokens: []
+    folder_tokens: []
+    search_keywords: []
+    target_scope: private
+    knowledge_mode: stable
+  bases:
+    # - base_token: ""
+    #   table_id: ""
+    #   view_id: ""
+    #   name: ""
+    #   knowledge_mode: dynamic
+    #   target_scope: private
+  meegle:
+    # - project_key: ""
+    #   view_ids: []
+    #   mql: []
+    #   knowledge_mode: dynamic
+    #   target_scope: private
+  fixtures: []
+
+relevance:
+  include_keywords: []
+  exclude_keywords: []
+  related_people: []
+  related_projects: []
+  max_candidate_chars: 12000
+
+review:
+  storage: base
+  base_token: 待配置
+  tables:
+    proposals: 待配置
+    runs: 待配置
+    cursors: 待配置
+  reviewers: []
+
+runtime:
+  timezone: Asia/Shanghai
+  lookback_days: 7
+  lark_cli_path: lark-cli
+  meegle_cli_path: meegle

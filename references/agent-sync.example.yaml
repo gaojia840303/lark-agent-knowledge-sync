@@ -1,0 +1,52 @@
+agent:
+  id: brand-six-elements
+  name: 品牌六要素 Agent
+  owner: 待配置
+
+knowledge:
+  wiki_space_id: 待配置
+  public_folder_token: 待配置
+  private_folder_token: 待配置
+  public_document_token: 待配置
+  private_document_token: 待配置
+
+sources:
+  meetings:
+    keywords: []
+    minutes_keywords: []
+    participant_ids: []
+    owner_ids: []
+    minute_tokens: []
+    target_scope: private
+    knowledge_mode: stable
+  documents:
+    document_tokens: []
+    folder_tokens: []
+    search_keywords: []
+    target_scope: private
+    knowledge_mode: stable
+  bases: []
+  meegle: []
+  fixtures: []
+
+relevance:
+  include_keywords: []
+  exclude_keywords: []
+  related_people: []
+  related_projects: []
+  max_candidate_chars: 12000
+
+review:
+  storage: local
+  base_token: 待配置
+  tables:
+    proposals: 知识变更审核表
+    runs: 同步运行表
+    cursors: 同步游标表
+  reviewers: []
+
+runtime:
+  timezone: Asia/Shanghai
+  lookback_days: 7
+  lark_cli_path: lark-cli
+  meegle_cli_path: meegle

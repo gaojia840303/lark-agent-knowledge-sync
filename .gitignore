@@ -1,0 +1,31 @@
+# Agent-specific runtime configuration and state
+agent-sync.yaml
+agent-sync.local.yaml
+.agent-sync/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime output
+*.log
+logs/
+downloads/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
