@@ -1,4 +1,4 @@
 interface:
   display_name: "飞书 Agent 知识同步"
-  short_description: "按 Agent 配置完成飞书知识增量采集、审核与安全更新"
-  default_prompt: "Use $lark-agent-knowledge-sync to scan configured Feishu sources and create reviewable knowledge updates."
+  short_description: "按 Agent 配置完成飞书上游知识采集、审核与安全沉淀"
+  default_prompt: "Use $lark-agent-knowledge-sync to scan configured upstream Feishu sources and create reviewable knowledge updates without rescanning the target knowledge base."

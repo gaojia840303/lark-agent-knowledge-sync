@@ -20,6 +20,8 @@ sources:
     target_scope: private
     knowledge_mode: stable
   documents:
+    # 仅配置目标知识库之外的上游文档。
+    # 不得重复填写 knowledge.public/private_document_token。
     document_tokens: []
     folder_tokens: []
     search_keywords: []

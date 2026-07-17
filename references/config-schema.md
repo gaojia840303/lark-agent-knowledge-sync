@@ -35,6 +35,14 @@
 
 目录 Token 负责权限边界，文档 Token 负责确定性写入。MVP 不能只配置目录而没有目标文档。
 
+目标文档是正式知识终点，不是采集来源。配置时必须保证：
+
+- `public_document_token`、`private_document_token` 不出现在 `sources.documents.document_tokens`。
+- `public_folder_token`、`private_folder_token` 不作为无边界的上游扫描目录。
+- 需要比较冲突或检查幂等时，可以读取目标文档，但不能据此生成“目标文档变化提案”。
+
+当前 V1 配置解析器尚未自动拒绝来源与目标 Token 重叠，MVP 配置审核必须人工检查；该校验应列入后续实现项。
+
 ### relevance
 
 - `include_keywords`：至少命中一项才能入选；为空时允许白名单来源进入。
@@ -72,7 +80,7 @@ meetings:
 
 `vc +search` 至少需要关键词、参与者或时间条件。Skill 自动添加上次游标到当前日期的时间范围。
 
-### documents
+### documents（仅上游文档）
 
 ```yaml
 documents:
@@ -83,7 +91,7 @@ documents:
   knowledge_mode: stable
 ```
 
-文件夹搜索必须同时配置 `search_keywords`；不执行无边界的全空间扫描。
+这里只配置目标知识库之外、可能产生待沉淀知识的上游文档。文件夹搜索必须同时配置 `search_keywords`；不执行无边界的全空间扫描，也不扫描公共或专属目标知识目录。
 
 ### bases
 
@@ -117,7 +125,7 @@ meegle:
 
 ## 运行模式
 
-- `scan`：采集并生成审核提案，不写正式知识。
+- `scan`：采集上游来源并生成审核提案，不扫描目标知识库的普通编辑，也不直接写正式知识。
 - `apply`：只应用已批准提案。
 - `status`：查看最近运行、游标和提案数量。
 - `bootstrap-base`：创建管理 Base 与三个数据表。
