@@ -1,3 +1,5 @@
+# 仅用于受控来源的单 Agent MVP，不代表允许公司级全量扫描。
+# 当前 V2 尚未实现单次总量/Token 硬预算；先按 docs/采集范围与成本验证.md 人工控制。
 agent:
   id: your-agent-id
   name: 待配置
@@ -12,6 +14,7 @@ knowledge:
 
 sources:
   meetings:
+    # 至少填写业务关键词，并叠加参与人、所有者或固定妙记范围。
     keywords: []
     minutes_keywords: []
     participant_ids: []
@@ -20,29 +23,35 @@ sources:
     target_scope: private
     knowledge_mode: stable
   documents:
-    # 仅配置目标知识库之外的上游文档。
-    # 不得重复填写 knowledge.public/private_document_token。
+    # 仅配置目标知识库之外的主动提交文档或指定上游共享目录。
+    # 搜索必须同时填写 folder_tokens 和 search_keywords，禁止全空间关键词搜索。
+    # 个人文档默认不配置；不得重复填写 knowledge.public/private_document_token。
     document_tokens: []
     folder_tokens: []
     search_keywords: []
     target_scope: private
     knowledge_mode: stable
   bases:
+    # stable 来源必须使用“待沉淀/已确认决策/已完成复盘”等专用 view_id。
     # - base_token: ""
     #   table_id: ""
     #   view_id: ""
     #   name: ""
     #   knowledge_mode: dynamic
     #   target_scope: private
+    #   max_pages: 1
   meegle:
+    # stable 来源必须使用专用 view_ids 或 mql，禁止整项目读取。
     # - project_key: ""
     #   view_ids: []
     #   mql: []
     #   knowledge_mode: dynamic
     #   target_scope: private
+    #   max_pages: 1
   fixtures: []
 
 relevance:
+  # 搜索型来源至少填写 include_keywords / related_people / related_projects 之一。
   include_keywords: []
   exclude_keywords: []
   related_people: []
@@ -60,6 +69,7 @@ review:
 
 runtime:
   timezone: Asia/Shanghai
+  # 日常使用短回溯窗口；历史补录使用独立配置和单独预算。
   lookback_days: 7
   lark_cli_path: lark-cli
   meegle_cli_path: meegle
