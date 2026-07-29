@@ -16,8 +16,9 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
@@ -25,6 +26,25 @@ from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 APPROVAL_STATES = {"待审核", "已批准", "已拒绝", "需修改", "已应用"}
 PLACEHOLDERS = {"", "待配置", "TODO", "todo", "null", "None"}
+TARGET_SCOPES = {"public", "private"}
+KNOWLEDGE_MODES = {"stable", "dynamic"}
+ADMISSION_TYPES = {"proactive_submission", "dedicated_view", "bounded_scan", "explicit_approval", "test_fixture"}
+AUTHORITY_LEVELS = {
+    "formal_policy",
+    "approved_decision",
+    "business_owner",
+    "validated_experience",
+    "reference",
+}
+DEFAULT_BUDGETS = {
+    "max_metadata_items": 100,
+    "max_fulltext_items": 20,
+    "max_fulltext_chars": 60000,
+    "max_candidates": 10,
+    "max_proposals": 5,
+    "max_runtime_seconds": 600,
+    "max_source_api_calls": 100,
+}
 SECRET_KEY_RE = re.compile(
     r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|app[_-]?secret|"
     r"authorization|cookie|client[_-]?secret|private[_-]?key)"
@@ -57,6 +77,10 @@ class ConfigError(SyncError):
 
 
 class CommandError(SyncError):
+    pass
+
+
+class BudgetExceeded(SyncError):
     pass
 
 
@@ -218,6 +242,42 @@ def load_config(path: str | Path) -> tuple[dict[str, Any], Path]:
     return parsed, config_path
 
 
+def _nonempty_list(value: Any) -> bool:
+    return isinstance(value, list) and any(str(item).strip() not in PLACEHOLDERS for item in value)
+
+
+def _active_values(source: Mapping[str, Any], keys: Sequence[str]) -> bool:
+    return any(_nonempty_list(source.get(key)) for key in keys)
+
+
+def _validate_source_policy(source: Mapping[str, Any], label: str, errors: list[str]) -> None:
+    admission = str(source.get("admission_type", "")).strip()
+    authority = str(source.get("authority_level", "")).strip()
+    if admission not in ADMISSION_TYPES - {"test_fixture"}:
+        errors.append(
+            f"{label}.admission_type 必须为 proactive_submission、dedicated_view、"
+            "bounded_scan 或 explicit_approval"
+        )
+    if str(source.get("source_owner", "")).strip() in PLACEHOLDERS:
+        errors.append(f"{label}.source_owner 必填")
+    if str(source.get("business_purpose", "")).strip() in PLACEHOLDERS:
+        errors.append(f"{label}.business_purpose 必填")
+    if authority not in AUTHORITY_LEVELS:
+        errors.append(
+            f"{label}.authority_level 必须为 formal_policy、approved_decision、"
+            "business_owner、validated_experience 或 reference"
+        )
+
+
+def _validate_source_shape(source: Mapping[str, Any], label: str, errors: list[str]) -> None:
+    scope = str(source.get("target_scope", "private"))
+    mode = str(source.get("knowledge_mode", "stable"))
+    if scope not in TARGET_SCOPES:
+        errors.append(f"{label}.target_scope 只能是 public 或 private")
+    if mode not in KNOWLEDGE_MODES:
+        errors.append(f"{label}.knowledge_mode 只能是 stable 或 dynamic")
+
+
 def validate_config(config: Mapping[str, Any], strict: bool = False) -> list[str]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -228,9 +288,12 @@ def validate_config(config: Mapping[str, Any], strict: bool = False) -> list[str
         agent_id = str(agent.get("id", ""))
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", agent_id):
             errors.append("agent.id 必须为 2-63 位小写字母、数字或短横线")
-        for key in ("name", "owner"):
+        for key in ("name", "owner", "role"):
             if str(agent.get(key, "")).strip() in PLACEHOLDERS:
                 errors.append(f"agent.{key} 必填")
+        for key in ("responsibilities", "decision_scope", "output_contract", "success_metrics"):
+            if not _nonempty_list(agent.get(key)):
+                errors.append(f"agent.{key} 必须至少配置一项")
 
     knowledge = config.get("knowledge")
     if not isinstance(knowledge, Mapping):
@@ -246,10 +309,109 @@ def validate_config(config: Mapping[str, Any], strict: bool = False) -> list[str
             if str(knowledge.get(key, "")).strip() in PLACEHOLDERS:
                 message = f"knowledge.{key} 尚未配置"
                 (errors if strict else warnings).append(message)
+        for left, right, label in (
+            ("public_folder_token", "private_folder_token", "公共与专属知识目录"),
+            ("public_document_token", "private_document_token", "公共与专属目标文档"),
+        ):
+            left_value = str(knowledge.get(left, "")).strip()
+            right_value = str(knowledge.get(right, "")).strip()
+            if left_value not in PLACEHOLDERS and left_value == right_value:
+                errors.append(f"{label}不能使用同一个 Token")
+
 
     sources = config.get("sources")
     if not isinstance(sources, Mapping):
         errors.append("缺少 sources 配置")
+        sources = {}
+    relevance_rules = config.get("relevance", {})
+    if not isinstance(relevance_rules, Mapping):
+        errors.append("relevance 必须是对象")
+        relevance_rules = {}
+    has_relevance = any(
+        _nonempty_list(relevance_rules.get(key))
+        for key in ("include_keywords", "related_people", "related_projects")
+    )
+    max_candidate_chars = relevance_rules.get("max_candidate_chars", 12000)
+    if not isinstance(max_candidate_chars, int) or not 1 <= max_candidate_chars <= 100000:
+        errors.append("relevance.max_candidate_chars 必须为 1-100000 的整数")
+
+    meetings = sources.get("meetings", {}) if isinstance(sources, Mapping) else {}
+    if meetings and not isinstance(meetings, Mapping):
+        errors.append("sources.meetings 必须是对象")
+    elif isinstance(meetings, Mapping):
+        meeting_search = _active_values(meetings, ("keywords", "minutes_keywords"))
+        meeting_active = meeting_search or _active_values(meetings, ("minute_tokens",))
+        if meeting_active:
+            _validate_source_shape(meetings, "sources.meetings", errors)
+            _validate_source_policy(meetings, "sources.meetings", errors)
+        if _nonempty_list(meetings.get("keywords")) and not _nonempty_list(meetings.get("participant_ids")):
+            errors.append("sources.meetings.keywords 搜索必须同时限定 participant_ids")
+        if _nonempty_list(meetings.get("minutes_keywords")) and not (
+            _nonempty_list(meetings.get("participant_ids")) or _nonempty_list(meetings.get("owner_ids"))
+        ):
+            errors.append("sources.meetings.minutes_keywords 搜索必须同时限定 participant_ids 或 owner_ids")
+        if meeting_search and not has_relevance:
+            errors.append("搜索型会议或妙记来源必须配置至少一项业务相关性规则")
+
+    documents = sources.get("documents", {}) if isinstance(sources, Mapping) else {}
+    if documents and not isinstance(documents, Mapping):
+        errors.append("sources.documents 必须是对象")
+    elif isinstance(documents, Mapping):
+        document_search = _nonempty_list(documents.get("search_keywords"))
+        document_active = document_search or _nonempty_list(documents.get("document_tokens"))
+        if document_active:
+            _validate_source_shape(documents, "sources.documents", errors)
+            _validate_source_policy(documents, "sources.documents", errors)
+        if document_search and not _nonempty_list(documents.get("folder_tokens")):
+            errors.append("文档关键词搜索必须同时配置非空 sources.documents.folder_tokens")
+        if document_search and not has_relevance:
+            errors.append("搜索型文档来源必须配置至少一项业务相关性规则")
+        if isinstance(knowledge, Mapping):
+            target_docs = {
+                str(knowledge.get("public_document_token", "")).strip(),
+                str(knowledge.get("private_document_token", "")).strip(),
+            } - PLACEHOLDERS
+            target_folders = {
+                str(knowledge.get("public_folder_token", "")).strip(),
+                str(knowledge.get("private_folder_token", "")).strip(),
+            } - PLACEHOLDERS
+            source_docs = {str(item).strip() for item in documents.get("document_tokens", []) or []}
+            source_folders = {str(item).strip() for item in documents.get("folder_tokens", []) or []}
+            if target_docs & source_docs:
+                errors.append("目标知识文档不能同时出现在 sources.documents.document_tokens")
+            if target_folders & source_folders:
+                errors.append("目标知识目录不能同时出现在 sources.documents.folder_tokens")
+
+    bases = sources.get("bases", []) if isinstance(sources, Mapping) else []
+    if bases and not isinstance(bases, list):
+        errors.append("sources.bases 必须是列表")
+    elif isinstance(bases, list):
+        for index, source in enumerate(bases):
+            label = f"sources.bases[{index}]"
+            if not isinstance(source, Mapping):
+                errors.append(f"{label} 必须是对象")
+                continue
+            _validate_source_shape(source, label, errors)
+            if str(source.get("knowledge_mode", "dynamic")) == "stable":
+                _validate_source_policy(source, label, errors)
+                if str(source.get("view_id", "")).strip() in PLACEHOLDERS:
+                    errors.append(f"{label} 稳定知识来源必须配置专用 view_id")
+
+    meegle_sources = sources.get("meegle", []) if isinstance(sources, Mapping) else []
+    if meegle_sources and not isinstance(meegle_sources, list):
+        errors.append("sources.meegle 必须是列表")
+    elif isinstance(meegle_sources, list):
+        for index, source in enumerate(meegle_sources):
+            label = f"sources.meegle[{index}]"
+            if not isinstance(source, Mapping):
+                errors.append(f"{label} 必须是对象")
+                continue
+            _validate_source_shape(source, label, errors)
+            if str(source.get("knowledge_mode", "dynamic")) == "stable":
+                _validate_source_policy(source, label, errors)
+                if not (_nonempty_list(source.get("view_ids")) or _nonempty_list(source.get("mql"))):
+                    errors.append(f"{label} 稳定知识来源必须配置专用 view_ids 或 mql")
+
     review = config.get("review", {})
     if not isinstance(review, Mapping):
         errors.append("review 必须是对象")
@@ -262,6 +424,25 @@ def validate_config(config: Mapping[str, Any], strict: bool = False) -> list[str
         for key in ("proposals", "runs", "cursors"):
             if not isinstance(tables, Mapping) or str(tables.get(key, "")).strip() in PLACEHOLDERS:
                 errors.append(f"Base 存储必须配置 review.tables.{key}")
+
+    fixtures = sources.get("fixtures", []) if isinstance(sources, Mapping) else []
+    if fixtures and (not isinstance(review, Mapping) or review.get("storage", "local") != "local"):
+        errors.append("sources.fixtures 只允许与 review.storage: local 一起用于测试")
+
+    runtime = config.get("runtime", {}) or {}
+    if not isinstance(runtime, Mapping):
+        errors.append("runtime 必须是对象")
+    else:
+        lookback = runtime.get("lookback_days", 7)
+        if not isinstance(lookback, int) or not 1 <= lookback <= 90:
+            errors.append("runtime.lookback_days 必须为 1-90 的整数")
+        for key, default in DEFAULT_BUDGETS.items():
+            value = runtime.get(key, default)
+            if not isinstance(value, int) or value <= 0:
+                errors.append(f"runtime.{key} 必须为正整数")
+            elif key == "max_runtime_seconds" and value > 86400:
+                errors.append("runtime.max_runtime_seconds 不能超过 86400")
+
 
     if errors:
         raise ConfigError("; ".join(errors))
@@ -424,12 +605,145 @@ class ToolRunner:
 
 
 @dataclass
+class RunBudget:
+    max_metadata_items: int
+    max_fulltext_items: int
+    max_fulltext_chars: int
+    max_candidates: int
+    max_proposals: int
+    max_runtime_seconds: int
+    max_source_api_calls: int
+    started_monotonic: float = field(default_factory=time.monotonic)
+    metadata_items: int = 0
+    fulltext_items: int = 0
+    fulltext_chars: int = 0
+    candidates: int = 0
+    proposals: int = 0
+    source_api_calls: int = 0
+    discarded_fulltext_items: int = 0
+    intake_stop_reason: str = ""
+    processing_stop_reason: str = ""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> "RunBudget":
+        runtime = config.get("runtime", {}) or {}
+        return cls(**{key: int(runtime.get(key, default)) for key, default in DEFAULT_BUDGETS.items()})
+
+    def elapsed_seconds(self) -> float:
+        return round(time.monotonic() - self.started_monotonic, 3)
+
+    def _time_available(self) -> bool:
+        if time.monotonic() - self.started_monotonic < self.max_runtime_seconds:
+            return True
+        reason = f"达到运行时长预算 {self.max_runtime_seconds} 秒"
+        self.intake_stop_reason = self.intake_stop_reason or reason
+        self.processing_stop_reason = self.processing_stop_reason or reason
+        return False
+
+    def _stop_intake(self, reason: str) -> None:
+        self.intake_stop_reason = self.intake_stop_reason or reason
+
+    def _stop_processing(self, reason: str) -> None:
+        self.processing_stop_reason = self.processing_stop_reason or reason
+
+    def claim_source_api(self) -> None:
+        if not self._time_available():
+            raise BudgetExceeded(self.stop_reason)
+        if self.intake_stop_reason:
+            raise BudgetExceeded(self.stop_reason)
+        if self.source_api_calls >= self.max_source_api_calls:
+            self._stop_intake(f"达到来源 API 调用预算 {self.max_source_api_calls} 次")
+            raise BudgetExceeded(self.stop_reason)
+        self.source_api_calls += 1
+
+    def claim_metadata(self, amount: int = 1) -> bool:
+        if not self._time_available() or self.intake_stop_reason:
+            return False
+        if self.metadata_items + amount > self.max_metadata_items:
+            self._stop_intake(f"达到元数据预算 {self.max_metadata_items} 条")
+            return False
+        self.metadata_items += amount
+        return True
+
+    def allow_fulltext(self) -> bool:
+        if not self._time_available() or self.intake_stop_reason:
+            return False
+        if self.fulltext_items >= self.max_fulltext_items:
+            self._stop_intake(f"达到正文预算 {self.max_fulltext_items} 条")
+            return False
+        return True
+
+    def record_fulltext(self, value: Any) -> bool:
+        text_chars = len(json_text(value))
+        self.fulltext_items += 1
+        self.fulltext_chars += text_chars
+        if self.fulltext_chars > self.max_fulltext_chars:
+            self.discarded_fulltext_items += 1
+            self._stop_intake(f"达到正文字符预算 {self.max_fulltext_chars} 字符")
+            return False
+        return self._time_available()
+
+    def claim_candidate(self) -> bool:
+        if not self._time_available() or self.processing_stop_reason:
+            return False
+        if self.candidates >= self.max_candidates:
+            self._stop_processing(f"达到候选预算 {self.max_candidates} 条")
+            return False
+        self.candidates += 1
+        return True
+
+    def claim_proposal(self) -> bool:
+        if not self._time_available() or self.processing_stop_reason:
+            return False
+        if self.proposals >= self.max_proposals:
+            self._stop_processing(f"达到提案预算 {self.max_proposals} 条")
+            return False
+        self.proposals += 1
+        return True
+
+    @property
+    def stop_reason(self) -> str:
+        reasons = [reason for reason in (self.intake_stop_reason, self.processing_stop_reason) if reason]
+        return "; ".join(dict.fromkeys(reasons))
+
+    def counts(self) -> dict[str, Any]:
+        return {
+            "metadata_items": self.metadata_items,
+            "fulltext_items": self.fulltext_items,
+            "fulltext_chars": self.fulltext_chars,
+            "discarded_fulltext_items": self.discarded_fulltext_items,
+            "candidates": self.candidates,
+            "proposal_budget_used": self.proposals,
+            "source_api_calls": self.source_api_calls,
+            "elapsed_seconds": self.elapsed_seconds(),
+        }
+
+
+class BudgetedRunner:
+    def __init__(self, delegate: Any, budget: RunBudget):
+        self.delegate = delegate
+        self.budget = budget
+
+    def lark(self, args: Sequence[str], timeout: int = 120) -> Any:
+        self.budget.claim_source_api()
+        return self.delegate.lark(args, timeout)
+
+    def meegle(self, args: Sequence[str], timeout: int = 120) -> Any:
+        self.budget.claim_source_api()
+        return self.delegate.meegle(args, timeout)
+
+
+@dataclass
 class NormalizedRecord:
     source_type: str
     source_id: str
     source_url: str
     title: str
     owner: str
+    source_owner: str
+    business_purpose: str
+    admission_type: str
+    authority_level: str
     updated_at: str
     collected_at: str
     content_hash: str
@@ -481,6 +795,10 @@ def normalize_record(raw: Mapping[str, Any], defaults: Mapping[str, Any]) -> Nor
         source_url=str(raw.get("source_url") or raw.get("url") or ""),
         title=str(raw.get("title") or raw.get("name") or f"{source_type}:{source_id}"),
         owner=str(raw.get("owner") or raw.get("owner_id") or ""),
+        source_owner=str(raw.get("source_owner") or defaults.get("source_owner") or ""),
+        business_purpose=str(raw.get("business_purpose") or defaults.get("business_purpose") or ""),
+        admission_type=str(raw.get("admission_type") or defaults.get("admission_type") or ""),
+        authority_level=str(raw.get("authority_level") or defaults.get("authority_level") or "reference"),
         updated_at=str(raw.get("updated_at") or raw.get("update_time") or raw.get("modified_time") or utc_now()),
         collected_at=str(raw.get("collected_at") or utc_now()),
         content_hash=sha256_text(serialized),
@@ -578,7 +896,12 @@ class LocalStore(Store):
 
     def put_run(self, run: Mapping[str, Any]) -> None:
         runs = self._read("runs.json", [])
-        runs.append(dict(run))
+        for index, existing in enumerate(runs):
+            if existing.get("run_id") == run.get("run_id"):
+                runs[index] = dict(run)
+                break
+        else:
+            runs.append(dict(run))
         self._write("runs.json", runs[-200:])
 
     def get_cursor(self, cursor_key: str) -> dict[str, Any] | None:
@@ -720,6 +1043,8 @@ class BaseStore(Store):
         return existing is None
 
     def put_proposal(self, proposal: Proposal) -> bool:
+        if self._find("proposals", "提案ID", proposal.proposal_id):
+            return False
         values = {
             "提案ID": proposal.proposal_id,
             "AgentID": proposal.agent_id,
@@ -880,6 +1205,15 @@ def _date_range(cursor: Mapping[str, Any] | None, lookback_days: int) -> tuple[s
     return start.date().isoformat(), end.date().isoformat()
 
 
+def _source_policy_defaults(source: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "source_owner": str(source.get("source_owner", "")),
+        "business_purpose": str(source.get("business_purpose", "")),
+        "admission_type": str(source.get("admission_type", "")),
+        "authority_level": str(source.get("authority_level", "reference")),
+    }
+
+
 def _raw_record(item: Mapping[str, Any], defaults: Mapping[str, Any]) -> NormalizedRecord:
     raw = {
         "source_type": defaults["source_type"],
@@ -896,9 +1230,11 @@ def _raw_record(item: Mapping[str, Any], defaults: Mapping[str, Any]) -> Normali
     return normalize_record(raw, defaults)
 
 
-def collect_fixture_batches(config: Mapping[str, Any], config_path: Path) -> list[list[NormalizedRecord]]:
+def collect_fixture_batches(config: Mapping[str, Any], config_path: Path, budget: RunBudget) -> list[list[NormalizedRecord]]:
     batches: dict[str, list[NormalizedRecord]] = {}
     for configured in (config.get("sources", {}) or {}).get("fixtures", []) or []:
+        if budget.intake_stop_reason:
+            break
         fixture_path = Path(str(configured))
         if not fixture_path.is_absolute():
             fixture_path = config_path.parent / fixture_path
@@ -907,30 +1243,44 @@ def collect_fixture_batches(config: Mapping[str, Any], config_path: Path) -> lis
         for raw in items:
             if not isinstance(raw, Mapping):
                 continue
+            if not budget.claim_metadata():
+                break
             defaults = {
                 "source_type": raw.get("source_type", "fixture"),
+                "source_owner": str(config.get("agent", {}).get("owner", "test")),
+                "business_purpose": "isolated test fixture",
+                "admission_type": "test_fixture",
+                "authority_level": "reference",
                 "batch_key": raw.get("batch_key", f"fixture:{fixture_path.name}"),
                 "target_scope": raw.get("target_scope", "private"),
                 "knowledge_mode": raw.get("knowledge_mode", "stable"),
             }
             record = normalize_record(raw, defaults)
+            if record.knowledge_mode == "stable":
+                if not budget.allow_fulltext() or not budget.record_fulltext(record.content):
+                    break
             batches.setdefault(record.batch_key, []).append(record)
     return list(batches.values())
 
 
-def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: ToolRunner) -> list[list[NormalizedRecord]]:
+def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Any, budget: RunBudget) -> list[list[NormalizedRecord]]:
     source = (config.get("sources", {}) or {}).get("meetings", {}) or {}
     if not isinstance(source, Mapping):
+        return []
+    if str(source.get("knowledge_mode", "stable")) != "stable":
         return []
     output: list[list[NormalizedRecord]] = []
     defaults_base = {
         "source_type": "meeting",
+        **_source_policy_defaults(source),
         "target_scope": source.get("target_scope", "private"),
         "knowledge_mode": source.get("knowledge_mode", "stable"),
     }
     lookback = int((config.get("runtime", {}) or {}).get("lookback_days", 7))
     participant_ids = [str(item) for item in source.get("participant_ids", []) or []]
     for keyword in source.get("keywords", []) or []:
+        if budget.intake_stop_reason:
+            break
         batch_key = f"meeting:query:{keyword}"
         start, end = _date_range(store.get_cursor(batch_key), lookback)
         args = ["vc", "+search", "--query", str(keyword), "--start", start, "--end", end, "--page-size", "30"]
@@ -944,6 +1294,8 @@ def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Too
             meeting_id = str(meeting.get("id") or meeting.get("meeting_id") or "")
             if not meeting_id:
                 continue
+            if not budget.claim_metadata() or not budget.allow_fulltext():
+                break
             content: dict[str, Any] = {"meeting": meeting}
             try:
                 recording = runner.lark(["vc", "+recording", "--meeting-ids", meeting_id])
@@ -955,6 +1307,8 @@ def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Too
                     content["notes"] = runner.lark(["vc", "+notes", "--meeting-ids", meeting_id])
             except CommandError as exc:
                 content["notes_error"] = str(exc)
+            if not budget.record_fulltext(content):
+                break
             item = dict(meeting)
             item["content"] = content
             item["source_id"] = meeting_id
@@ -962,6 +1316,8 @@ def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Too
             batch.append(_raw_record(item, defaults))
         output.append(batch)
     for keyword in source.get("minutes_keywords", []) or []:
+        if budget.intake_stop_reason:
+            break
         batch_key = f"minutes:query:{keyword}"
         start, end = _date_range(store.get_cursor(batch_key), lookback)
         args = ["minutes", "+search", "--query", str(keyword), "--start", start, "--end", end, "--page-size", "50"]
@@ -978,6 +1334,8 @@ def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Too
             minute_token = str(minute.get("minute_token") or minute.get("token") or minute.get("id") or "")
             if not minute_token:
                 continue
+            if not budget.claim_metadata() or not budget.allow_fulltext():
+                break
             notes = runner.lark(["vc", "+notes", "--minute-tokens", minute_token])
             raw = dict(minute)
             raw.update(
@@ -988,9 +1346,15 @@ def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Too
                     "content": {"minute": minute, "notes": notes},
                 }
             )
+            if not budget.record_fulltext(raw["content"]):
+                break
             batch.append(_raw_record(raw, dict(defaults_base, batch_key=batch_key)))
         output.append(batch)
     for minute_token in source.get("minute_tokens", []) or []:
+        if budget.intake_stop_reason:
+            break
+        if not budget.claim_metadata() or not budget.allow_fulltext():
+            break
         batch_key = f"meeting:minute:{minute_token}"
         notes = runner.lark(["vc", "+notes", "--minute-tokens", str(minute_token)])
         raw = {
@@ -999,28 +1363,39 @@ def collect_meeting_batches(config: Mapping[str, Any], store: Store, runner: Too
             "source_url": f"https://feishu.cn/minutes/{minute_token}",
             "content": notes,
         }
+        if not budget.record_fulltext(notes):
+            break
         output.append([normalize_record(raw, dict(defaults_base, batch_key=batch_key))])
     return output
 
 
-def collect_document_batches(config: Mapping[str, Any], runner: ToolRunner) -> list[list[NormalizedRecord]]:
+def collect_document_batches(config: Mapping[str, Any], runner: Any, budget: RunBudget) -> list[list[NormalizedRecord]]:
     source = (config.get("sources", {}) or {}).get("documents", {}) or {}
     if not isinstance(source, Mapping):
+        return []
+    if str(source.get("knowledge_mode", "stable")) != "stable":
         return []
     output: list[list[NormalizedRecord]] = []
     defaults_base = {
         "source_type": "document",
+        **_source_policy_defaults(source),
         "target_scope": source.get("target_scope", "private"),
         "knowledge_mode": source.get("knowledge_mode", "stable"),
     }
     seen: set[str] = set()
 
-    def fetch(token: str, batch_key: str) -> None:
+    def fetch(token: str, batch_key: str, metadata_claimed: bool = False) -> bool:
         if token in seen:
-            return
+            return True
         seen.add(token)
+        if not metadata_claimed and not budget.claim_metadata():
+            return False
+        if not budget.allow_fulltext():
+            return False
         data = runner.lark(["docs", "+fetch", "--doc", token])
         payload = data.get("data", data) if isinstance(data, Mapping) else data
+        if not budget.record_fulltext(payload):
+            return False
         raw = {
             "source_id": token,
             "title": find_first_key(payload, {"title", "name"}) or f"文档 {token}",
@@ -1030,28 +1405,38 @@ def collect_document_batches(config: Mapping[str, Any], runner: ToolRunner) -> l
         }
         output.append([normalize_record(raw, dict(defaults_base, batch_key=batch_key))])
 
+        return True
     for token in source.get("document_tokens", []) or []:
-        fetch(str(token), f"document:token:{token}")
+        if not fetch(str(token), f"document:token:{token}"):
+            break
 
     folders = [str(item) for item in source.get("folder_tokens", []) or []]
     for keyword in source.get("search_keywords", []) or []:
         filter_body = {"folder_tokens": folders} if folders else {}
         args = ["docs", "+search", "--query", str(keyword), "--page-size", "20"]
+        if budget.intake_stop_reason:
+            break
         if filter_body:
             args.extend(["--filter", json_text(filter_body)])
         result = runner.lark(args)
         for item in extract_items(result):
             if not isinstance(item, Mapping):
                 continue
+            if not budget.claim_metadata():
+                break
             token = str(item.get("token") or item.get("file_token") or item.get("obj_token") or "")
-            if token:
-                fetch(token, f"document:search:{keyword}")
+            if token and not fetch(token, f"document:search:{keyword}", metadata_claimed=True):
+                break
     return output
 
 
-def collect_base_batches(config: Mapping[str, Any], runner: ToolRunner) -> list[list[NormalizedRecord]]:
+def collect_base_batches(config: Mapping[str, Any], runner: Any, budget: RunBudget) -> list[list[NormalizedRecord]]:
     output: list[list[NormalizedRecord]] = []
     for source in (config.get("sources", {}) or {}).get("bases", []) or []:
+        if budget.intake_stop_reason:
+            break
+        if isinstance(source, Mapping) and str(source.get("knowledge_mode", "dynamic")) != "stable":
+            continue
         if not isinstance(source, Mapping):
             continue
         base_token, table_id = str(source.get("base_token", "")), str(source.get("table_id", ""))
@@ -1062,13 +1447,21 @@ def collect_base_batches(config: Mapping[str, Any], runner: ToolRunner) -> list[
         batch: list[NormalizedRecord] = []
         offset = 0
         for _ in range(int(source.get("max_pages", 5))):
-            args = ["base", "+record-list", "--base-token", base_token, "--table-id", table_id, "--offset", str(offset), "--limit", "200"]
+            if budget.intake_stop_reason:
+                break
+            remaining_metadata = budget.max_metadata_items - budget.metadata_items
+            if remaining_metadata <= 0:
+                budget._stop_intake(f"达到元数据预算 {budget.max_metadata_items} 条")
+                break
+            page_limit = min(200, remaining_metadata)
+            args = ["base", "+record-list", "--base-token", base_token, "--table-id", table_id, "--offset", str(offset), "--limit", str(page_limit)]
             if source.get("view_id"):
                 args.extend(["--view-id", str(source["view_id"])])
             data = runner.lark(args)
             page = extract_items(data)
             defaults = {
                 "source_type": "base",
+                **_source_policy_defaults(source),
                 "batch_key": batch_key,
                 "target_scope": source.get("target_scope", "private"),
                 "knowledge_mode": source.get("knowledge_mode", "dynamic"),
@@ -1077,9 +1470,16 @@ def collect_base_batches(config: Mapping[str, Any], runner: ToolRunner) -> list[
             for item in page:
                 if isinstance(item, Mapping):
                     record = dict(item)
+                    if not budget.claim_metadata() or not budget.allow_fulltext():
+                        break
                     record["source_id"] = f"{table_id}:{item.get('record_id') or item.get('id')}"
                     record["source_url"] = str(source.get("url", ""))
-                    batch.append(_raw_record(record, defaults))
+                    normalized = _raw_record(record, defaults)
+                    if not budget.record_fulltext(normalized.content):
+                        break
+                    batch.append(normalized)
+            if budget.intake_stop_reason:
+                break
             if not bool(find_first_key(data, {"has_more"})) or not page:
                 break
             offset += len(page)
@@ -1087,8 +1487,8 @@ def collect_base_batches(config: Mapping[str, Any], runner: ToolRunner) -> list[
     return output
 
 
-def collect_meegle_batches(config: Mapping[str, Any], runner: ToolRunner) -> list[list[NormalizedRecord]]:
-    sources = (config.get("sources", {}) or {}).get("meegle", []) or []
+def collect_meegle_batches(config: Mapping[str, Any], runner: Any, budget: RunBudget) -> list[list[NormalizedRecord]]:
+    sources = [source for source in (config.get("sources", {}) or {}).get("meegle", []) or [] if isinstance(source, Mapping) and str(source.get("knowledge_mode", "dynamic")) == "stable"]
     if not sources:
         return []
     status = runner.meegle(["auth", "status"])
@@ -1096,6 +1496,8 @@ def collect_meegle_batches(config: Mapping[str, Any], runner: ToolRunner) -> lis
         raise CommandError("Meegle 未登录；请先运行 meegle auth login --host project.feishu.cn")
     output: list[list[NormalizedRecord]] = []
     for source in sources:
+        if budget.intake_stop_reason:
+            break
         if not isinstance(source, Mapping):
             continue
         project_key = str(source.get("project_key", ""))
@@ -1103,6 +1505,7 @@ def collect_meegle_batches(config: Mapping[str, Any], runner: ToolRunner) -> lis
             raise ConfigError("Meegle 来源必须配置 project_key")
         defaults_base = {
             "source_type": "meegle",
+            **_source_policy_defaults(source),
             "target_scope": source.get("target_scope", "private"),
             "knowledge_mode": source.get("knowledge_mode", "dynamic"),
         }
@@ -1110,25 +1513,41 @@ def collect_meegle_batches(config: Mapping[str, Any], runner: ToolRunner) -> lis
             batch_key = f"meegle:{project_key}:view:{view_id}"
             batch: list[NormalizedRecord] = []
             for page_num in range(1, int(source.get("max_pages", 5)) + 1):
+                if budget.intake_stop_reason:
+                    break
                 data = runner.meegle(["view", "get", "--project-key", project_key, "--view-id", str(view_id), "--page-num", str(page_num)])
                 page = extract_items(data)
                 if not page:
                     break
                 for item in page:
                     if isinstance(item, Mapping):
+                        if not budget.claim_metadata() or not budget.allow_fulltext():
+                            break
                         record = dict(item)
                         record["source_id"] = f"{project_key}:{item.get('work_item_id') or item.get('id')}"
-                        batch.append(_raw_record(record, dict(defaults_base, batch_key=batch_key, title=str(view_id))))
+                        normalized = _raw_record(record, dict(defaults_base, batch_key=batch_key, title=str(view_id)))
+                        if not budget.record_fulltext(normalized.content):
+                            break
+                        batch.append(normalized)
+                if budget.intake_stop_reason:
+                    break
             output.append(batch)
         for index, mql in enumerate(source.get("mql", []) or []):
             batch_key = f"meegle:{project_key}:mql:{index}"
+            if budget.intake_stop_reason:
+                break
             data = runner.meegle(["workitem", "query", "--project-key", project_key, "--mql", str(mql)])
             batch = []
             for item in extract_items(data):
                 if isinstance(item, Mapping):
                     record = dict(item)
+                    if not budget.claim_metadata() or not budget.allow_fulltext():
+                        break
                     record["source_id"] = f"{project_key}:{item.get('work_item_id') or item.get('id')}"
-                    batch.append(_raw_record(record, dict(defaults_base, batch_key=batch_key, title=f"MQL {index + 1}")))
+                    normalized = _raw_record(record, dict(defaults_base, batch_key=batch_key, title=f"MQL {index + 1}"))
+                    if not budget.record_fulltext(normalized.content):
+                        break
+                    batch.append(normalized)
             output.append(batch)
     return output
 
@@ -1151,6 +1570,14 @@ def proposal_for(record: NormalizedRecord, config: Mapping[str, Any], reason: st
         flags = list(record.content.get("security_flags", []) or [])
     if flags:
         risk = "高"
+    governance_evidence = [
+        f"准入:{record.admission_type}",
+        f"权威:{record.authority_level}",
+        f"来源负责人:{record.source_owner}",
+        f"业务目的:{record.business_purpose}",
+    ]
+    reason = ";".join([reason, *governance_evidence])
+
     return Proposal(
         proposal_id=proposal_id,
         agent_id=agent_id,
@@ -1177,27 +1604,37 @@ def batch_hash(records: Iterable[NormalizedRecord]) -> str:
     return sha256_text("|".join(sorted(record.content_hash for record in records)))
 
 
-def scan(config: Mapping[str, Any], config_path: Path, runner: ToolRunner, store: Store) -> dict[str, Any]:
+def scan(config: Mapping[str, Any], config_path: Path, runner: ToolRunner, store: Store, dry_run: bool = False) -> dict[str, Any]:
     run_id = uuid.uuid4().hex
     started = utc_now()
-    counts = {"collected": 0, "dynamic": 0, "irrelevant": 0, "existing": 0, "proposed": 0, "failed_batches": 0}
+    budget = RunBudget.from_config(config)
+    bounded_runner = BudgetedRunner(runner, budget)
+    pending_cursors: list[dict[str, Any]] = []
+    preview_proposals: set[str] = set()
+    counts = {"collected": 0, "dynamic": 0, "irrelevant": 0, "existing": 0, "proposed": 0, "would_propose": 0, "failed_batches": 0}
     errors: list[dict[str, str]] = []
     batch_groups: list[list[NormalizedRecord]] = []
     collectors = [
-        ("fixtures", lambda: collect_fixture_batches(config, config_path)),
-        ("meetings", lambda: collect_meeting_batches(config, store, runner)),
-        ("documents", lambda: collect_document_batches(config, runner)),
-        ("bases", lambda: collect_base_batches(config, runner)),
-        ("meegle", lambda: collect_meegle_batches(config, runner)),
+        ("fixtures", lambda: collect_fixture_batches(config, config_path, budget)),
+        ("meetings", lambda: collect_meeting_batches(config, store, bounded_runner, budget)),
+        ("documents", lambda: collect_document_batches(config, bounded_runner, budget)),
+        ("bases", lambda: collect_base_batches(config, bounded_runner, budget)),
+        ("meegle", lambda: collect_meegle_batches(config, bounded_runner, budget)),
     ]
     for name, collector in collectors:
+        if budget.intake_stop_reason:
+            break
         try:
             batch_groups.extend(collector())
+        except BudgetExceeded:
+            break
         except Exception as exc:  # isolate source families
             counts["failed_batches"] += 1
             errors.append({"source": name, "error": str(exc)})
 
     for records in batch_groups:
+        if budget.processing_stop_reason:
+            break
         if not records:
             continue
         batch_key = records[0].batch_key
@@ -1216,13 +1653,28 @@ def scan(config: Mapping[str, Any], config_path: Path, runner: ToolRunner, store
                 if not accepted:
                     counts["irrelevant"] += 1
                     continue
+                if not budget.claim_candidate():
+                    break
                 proposal = proposal_for(record, config, reason)
-                if store.put_proposal(proposal):
-                    counts["proposed"] += 1
+                if dry_run:
+                    if proposal.proposal_id in preview_proposals or store.get_proposal(proposal.proposal_id):
+                        counts["existing"] += 1
+                        continue
+                    if not budget.claim_proposal():
+                        break
+                    preview_proposals.add(proposal.proposal_id)
+                    counts["would_propose"] += 1
                 else:
-                    counts["existing"] += 1
+                    if not budget.claim_proposal():
+                        break
+                    if store.put_proposal(proposal):
+                        counts["proposed"] += 1
+                    else:
+                        counts["existing"] += 1
+            if budget.stop_reason:
+                continue
             latest = max((record.updated_at for record in records), default=utc_now())
-            store.put_cursor(
+            pending_cursors.append(
                 {
                     "cursor_key": batch_key,
                     "agent_id": config["agent"]["id"],
@@ -1237,7 +1689,10 @@ def scan(config: Mapping[str, Any], config_path: Path, runner: ToolRunner, store
             counts["failed_batches"] += 1
             errors.append({"source": batch_key, "error": str(exc)})
 
-    if errors and counts["collected"]:
+    counts.update(budget.counts())
+    if budget.stop_reason:
+        status = "partial"
+    elif errors and counts["collected"]:
         status = "partial"
     elif errors:
         status = "failed"
@@ -1251,8 +1706,21 @@ def scan(config: Mapping[str, Any], config_path: Path, runner: ToolRunner, store
         "status": status,
         "counts": counts,
         "errors": errors,
+        "dry_run": dry_run,
+        "budget_stop_reason": budget.stop_reason,
     }
-    store.put_run(run)
+    if not dry_run:
+        store.put_run(run)
+        for cursor in pending_cursors:
+            try:
+                store.put_cursor(cursor)
+            except Exception as exc:
+                counts["failed_batches"] += 1
+                errors.append({"source": str(cursor["cursor_key"]), "error": f"游标提交失败: {exc}"})
+                run["status"] = "partial" if counts["collected"] else "failed"
+                run["ended_at"] = utc_now()
+                store.put_run(run)
+                break
     return run
 
 
@@ -1391,6 +1859,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--strict", action="store_true")
     scan_cmd = sub.add_parser("scan")
     scan_cmd.add_argument("--config", required=True)
+    scan_cmd.add_argument("--dry-run", action="store_true", help="preview without writing proposals, runs, or cursors")
     apply_cmd = sub.add_parser("apply")
     apply_cmd.add_argument("--config", required=True)
     apply_cmd.add_argument("--proposal-id", required=True)
@@ -1419,7 +1888,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runner = ToolRunner(config)
                 store = make_store(config, config_path, runner)
                 if args.command == "scan":
-                    result = scan(config, config_path, runner, store)
+                    result = scan(config, config_path, runner, store, args.dry_run)
                 elif args.command == "apply":
                     result = apply_proposal(config, args.proposal_id, runner, store, args.dry_run)
                 elif args.command == "status":

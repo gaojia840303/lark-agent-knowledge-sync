@@ -60,10 +60,10 @@ class Registry:
                 return config, resolved
         raise sync.ConfigError(f"未找到 Agent 配置: {agent_id}")
 
-    def scan(self, agent_id: str) -> dict:
+    def scan(self, agent_id: str, dry_run: bool = False) -> dict:
         config, path = self.config(agent_id)
         runner = sync.ToolRunner(config)
-        result = sync.scan(config, path, runner, sync.make_store(config, path, runner))
+        result = sync.scan(config, path, runner, sync.make_store(config, path, runner), dry_run=dry_run)
         with self.lock:
             self.runs[result["run_id"]] = result
         return result
@@ -128,6 +128,9 @@ def handler_factory(registry: Registry, secret: str):
                 if len(parts) == 4 and parts[:2] == ["v1", "agents"] and parts[3] == "sync":
                     # The body is intentionally ignored: it may not override sources or destinations.
                     return self._reply(202, registry.scan(parts[2]))
+                if len(parts) == 4 and parts[:2] == ["v1", "agents"] and parts[3] == "preview":
+                    # Preview uses the server-side configuration and performs no proposal, run, or cursor writes.
+                    return self._reply(200, registry.scan(parts[2], dry_run=True))
                 if len(parts) == 4 and parts[:2] == ["v1", "proposals"] and parts[3] == "apply":
                     agent_id = str(body.get("agent_id", ""))
                     if not agent_id:
