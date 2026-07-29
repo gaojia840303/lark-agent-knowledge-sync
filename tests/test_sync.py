@@ -69,6 +69,13 @@ class FakeRunner:
 
 
 class SyncTests(unittest.TestCase):
+    def test_config_templates_parse(self):
+        root = Path(__file__).parents[1]
+        for relative in ("agent-sync.example.yaml", "references/agent-sync.example.yaml"):
+            parsed = sync.parse_simple_yaml((root / relative).read_text(encoding="utf-8"))
+            self.assertIn("agent", parsed, relative)
+            self.assertIn("runtime", parsed, relative)
+
     def test_simple_yaml_accepts_common_inline_lists(self):
         parsed = sync.parse_simple_yaml(
             "agent:\n  id: demo-agent\nrelevance:\n  include_keywords: [品牌, 产品]\n"
@@ -277,7 +284,7 @@ class SyncTests(unittest.TestCase):
             self.assertEqual(second["status"], "already_applied")
             update_calls = [call for call in runner.calls if call[:2] == ["docs", "+update"]]
             self.assertEqual(len(update_calls), 1)
-
+            self.assertIn("治理依据：", runner.document["content"])
 
 if __name__ == "__main__":
     unittest.main()

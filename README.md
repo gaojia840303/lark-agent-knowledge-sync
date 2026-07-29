@@ -75,12 +75,12 @@ python scripts/sync.py apply --config .\agent-sync.yaml --proposal-id "<proposal
 - [项目契约（当前上位基线）](docs/项目契约.md)
 - [Source Manifest 来源准入清单](references/source-manifest.md)
 - [单 Agent MVP 评测卡](docs/MVP评测卡.md)
-- [周会工作汇报版](docs/Agent自动更新能力周会工作汇报.md)
+- [阶段工作汇报](docs/Agent自动更新能力周会工作汇报.md)
 - [知识库绑定行为验证](docs/知识库绑定行为验证.md)
 - [上游采集范围与成本验证](docs/采集范围与成本验证.md)
 - [配置说明](references/config-schema.md)
 - [MVP 运行说明](docs/MVP运行说明.md)
-- [落地方案（修订版）](docs/Agent自动更新能力落地方案.md)
+- [关键知识维护与供给能力落地方案](docs/Agent自动更新能力落地方案.md)
 - [安全与审核规则](references/knowledge-policy.md)
 
 ## 命令与接口

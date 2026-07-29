@@ -1730,6 +1730,7 @@ def render_knowledge(proposal: Mapping[str, Any]) -> str:
         f"> 同步标识：`{proposal['proposal_id']}`  \n"
         f"> 来源：{proposal.get('source_type', '')} / {proposal.get('source_url') or proposal.get('source_id', '')}  \n"
         f"> 来源时间：{proposal.get('source_time', '')}  \n"
+        f"> 治理依据：{proposal.get('relevance_reason', '')}  \n"
         f"> 内容哈希：`{proposal.get('content_hash', '')}`\n\n"
         f"{proposal.get('knowledge_content', '')}\n"
     )
