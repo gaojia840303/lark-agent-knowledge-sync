@@ -23,6 +23,11 @@
 | `id` | 是 | 全局唯一、小写短横线标识 |
 | `name` | 是 | Agent 名称 |
 | `owner` | 是 | 业务负责人 |
+| `role` | 是 | Agent 在业务流程中的角色 |
+| `responsibilities` | 是 | 至少一项持续职责 |
+| `decision_scope` | 是 | Agent 可以判断和不能越界的范围 |
+| `output_contract` | 是 | 可验收的固定输出 |
+| `success_metrics` | 是 | 至少一项业务或质量指标 |
 
 ### knowledge
 
@@ -42,7 +47,7 @@
 - `public_folder_token`、`private_folder_token` 不作为无边界的上游扫描目录。
 - 需要比较冲突或检查幂等时，可以读取目标文档，但不能据此生成“目标文档变化提案”。
 
-当前 V2 配置解析器尚未自动拒绝来源与目标 Token 重叠，MVP 配置审核必须人工检查；该校验应列入后续实现项。
+当前解析器会拒绝目标文档出现在 `document_tokens`、目标目录出现在 `folder_tokens`，并拒绝公共/专属目标使用同一个 Token。
 
 ### relevance
 
@@ -51,7 +56,7 @@
 - `related_people`、`related_projects`：与包含词合并为相关性证据。
 - `max_candidate_chars`：单条候选正文上限，默认 `12000`。
 
-生产准入规则比当前解析器更严格：搜索型会议和文档来源不得将 `include_keywords`、`related_people`、`related_projects` 全部留空。只有主动提交的明确 Token，或已经经过业务负责人批准的专用 Base/Meegle 视图，才允许把来源本身作为相关性证据。
+解析器会拒绝搜索型会议和文档来源把 `include_keywords`、`related_people`、`related_projects` 全部留空。只有主动提交的明确 Token，或已经经过业务负责人批准的专用 Base/Meegle 视图，才允许把来源本身作为相关性证据。
 
 ### review
 
@@ -67,11 +72,29 @@
 - `meegle_cli_path`：可选；默认查 PATH。
 - `lookback_days`：首次扫描回溯天数，默认 `7`。
 - `timezone`：默认 `Asia/Shanghai`。
+- `max_metadata_items`：单次允许进入处理的元数据条数，默认 `100`。
+- `max_fulltext_items`：单次正文条数，默认 `20`。
+- `max_fulltext_chars`：单次正文总字符，默认 `60000`。
+- `max_candidates`：进入提案判断的候选数，默认 `10`。
+- `max_proposals`：单次新提案上限，默认 `5`。
+- `max_runtime_seconds`：单次运行时长，默认 `600`。
+- `max_source_api_calls`：上游来源 API 调用次数，默认 `100`；审核存储自身调用不计入该字段。
 
-`lookback_days` 只用于会议和妙记的时间范围，不代表文档、Base 和 Meegle 已经完成来源侧增量。日常运行使用短时间窗；一次性历史补录必须使用独立配置和单独批准的预算。
+`lookback_days` 只用于会议和妙记的时间范围，不是调度周期，也不代表文档、Base 和 Meegle 已经完成来源侧增量。日常运行使用短时间窗；一次性历史补录必须使用独立配置和单独批准的预算。
 
 ## 数据源配置
 
+
+### 来源治理公共字段
+
+实际启用的会议、妙记、上游文档和稳定 Base/Meegle 来源必须填写：
+
+- `admission_type`：`proactive_submission`、`dedicated_view`、`bounded_scan` 或 `explicit_approval`。
+- `source_owner`：来源范围、质量和撤权负责人。
+- `business_purpose`：该 Agent 读取来源的业务目的。
+- `authority_level`：`formal_policy`、`approved_decision`、`business_owner`、`validated_experience` 或 `reference`。
+
+完整定义见 [Source Manifest](source-manifest.md)。运行时会把四项信息附加到提案的“相关性理由”，但当前不会自动裁决有效期、替代或冲突。
 ### meetings
 
 ```yaml
@@ -80,6 +103,10 @@ meetings:
   participant_ids: [ou_xxx]
   minute_tokens: []
   target_scope: private
+  admission_type: bounded_scan
+  source_owner: 品牌负责人
+  business_purpose: 发现已确认的品牌决策
+  authority_level: approved_decision
   knowledge_mode: stable
 ```
 
@@ -132,20 +159,20 @@ meegle:
 
 ## 当前实现边界
 
-以下是 V2 已实现能力与目标能力的区分：
+以下是当前已实现能力与后续目标能力的区分：
 
-| 能力 | 当前 V2 | MVP / 生产要求 |
+| 能力 | 当前实现 | 后续要求 |
 |---|---|---|
-| 来源范围 | 支持显式 Token、关键词、目录、表、视图、项目和 MQL | 强制共享目录、专用视图、个人文档默认拒绝和搜索型相关性条件 |
+| 来源范围 | 强制目标/来源隔离、文档目录、会议人员范围、稳定专用视图、搜索相关性和来源治理字段 | 接入真实业务授权台账和撤权事件 |
 | 增量 | 会议/妙记使用时间游标；所有来源使用批次哈希避免重复提案 | Docs、Base、Meegle 在来源侧按更新时间或事件取增量 |
 | 正文读取 | 部分来源先取正文或分页数据，再做筛选和批次哈希 | 元数据与规则通过后才取正文，长文只取摘要或变化段落 |
 | 相关性 | 字符串匹配关键词、人员和项目 | 少量候选进入语义模型判断 |
 | 知识提炼 | 截取来源内容生成候选，`Agent推断` 为空 | 模型生成事实、提炼结论和推断分离的提案 |
-| 成本限制 | 单条 `max_candidate_chars`；Base/Meegle 支持来源级 `max_pages` | 单次元数据、正文、总字符、候选、Token、提案、时长和 API 次数硬预算 |
-| 预演 | 无正式 `dry-run` | 支持只统计不写提案和游标的预演模式 |
+| 成本限制 | 强制来源 API、元数据、正文、总字符、候选、提案和时长预算 | 模型接入后增加输入/输出 Token 硬预算 |
+| 预演 | `scan --dry-run` 读取受控来源但不写提案、运行和游标 | 增加按来源的完整漏斗与延期队列 |
 | 多 Agent 复用 | 各 Agent 独立采集 | 相同来源采集一次、缓存一次、分别路由 |
 
-计划中的预算字段不得在当前版本中被理解为已经生效。目标结构如下，需在同步核心实现并测试后才能用于生产：
+以下 `runtime` 字段已经由同步核心执行；模型尚未启用，因此 `model_budget` 仍是后续目标，不能填写为已执行：
 
 ```yaml
 runtime:
@@ -159,6 +186,7 @@ runtime:
 model_budget:
   max_input_tokens: 15000
   max_output_tokens: 3000
+  max_source_api_calls: 100
 ```
 
 首个 MVP 在代码补齐前，按 [采集范围与成本验证](../docs/采集范围与成本验证.md) 使用隔离、小范围配置并人工记录这些指标；不得直接开启公司级或多 Agent 自动运行。

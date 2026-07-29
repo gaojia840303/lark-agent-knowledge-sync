@@ -1,4 +1,4 @@
 interface:
-  display_name: "飞书 Agent 知识同步"
-  short_description: "从受控飞书来源发现、审核并安全沉淀 Agent 知识"
-  default_prompt: "Use $lark-agent-knowledge-sync to process explicitly scoped upstream Feishu knowledge candidates with bounded intake and review, without scanning company-wide content, unapproved personal documents, or the target knowledge base."
+  display_name: "Agent 关键知识维护"
+  short_description: "按 Agent 输出契约从受控飞书来源维护可信知识"
+  default_prompt: "Use $lark-agent-knowledge-sync to maintain Agent-specific knowledge from explicitly governed Feishu sources, enforcing the Agent role and output contract, bounded intake, review, and target isolation without scanning company-wide content or unapproved personal documents."

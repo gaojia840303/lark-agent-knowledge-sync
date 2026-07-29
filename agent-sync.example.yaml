@@ -1,9 +1,14 @@
 # 仅用于受控来源的单 Agent MVP，不代表允许公司级全量扫描。
-# 当前 V2 尚未实现单次总量/Token 硬预算；先按 docs/采集范围与成本验证.md 人工控制。
+# 已内置来源 API、元数据、正文、候选、提案和时长硬预算；模型 Token 预算在语义阶段接入后另行执行。
 agent:
   id: your-agent-id
   name: 待配置
   owner: 待配置
+  role: 待配置
+  responsibilities: [待配置]
+  decision_scope: [待配置]
+  output_contract: [待配置]
+  success_metrics: [待配置]
 
 knowledge:
   wiki_space_id: 待配置
@@ -16,6 +21,10 @@ sources:
   meetings:
     # 至少填写业务关键词，并叠加参与人、所有者或固定妙记范围。
     keywords: []
+    admission_type: bounded_scan
+    source_owner: 待配置
+    business_purpose: 待配置
+    authority_level: approved_decision
     minutes_keywords: []
     participant_ids: []
     owner_ids: []
@@ -28,6 +37,10 @@ sources:
     # 个人文档默认不配置；不得重复填写 knowledge.public/private_document_token。
     document_tokens: []
     folder_tokens: []
+    admission_type: proactive_submission
+    source_owner: 待配置
+    business_purpose: 待配置
+    authority_level: business_owner
     search_keywords: []
     target_scope: private
     knowledge_mode: stable
@@ -39,6 +52,10 @@ sources:
     #   name: ""
     #   knowledge_mode: dynamic
     #   target_scope: private
+    #   admission_type: dedicated_view
+    #   source_owner: 待配置
+    #   business_purpose: 待配置
+    #   authority_level: approved_decision
     #   max_pages: 1
   meegle:
     # stable 来源必须使用专用 view_ids 或 mql，禁止整项目读取。
@@ -47,6 +64,10 @@ sources:
     #   mql: []
     #   knowledge_mode: dynamic
     #   target_scope: private
+    #   admission_type: dedicated_view
+    #   source_owner: 待配置
+    #   business_purpose: 待配置
+    #   authority_level: validated_experience
     #   max_pages: 1
   fixtures: []
 
@@ -69,7 +90,14 @@ review:
 
 runtime:
   timezone: Asia/Shanghai
-  # 日常使用短回溯窗口；历史补录使用独立配置和单独预算。
+  # 回溯窗口不等于调度周期；历史补录使用独立配置和单独预算。
   lookback_days: 7
   lark_cli_path: lark-cli
   meegle_cli_path: meegle
+  max_metadata_items: 100
+  max_fulltext_items: 20
+  max_fulltext_chars: 60000
+  max_candidates: 10
+  max_proposals: 5
+  max_runtime_seconds: 600
+  max_source_api_calls: 100
