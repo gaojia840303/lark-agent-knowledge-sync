@@ -23,6 +23,7 @@ venv/
 *.log
 logs/
 downloads/
+meeting-artifacts/
 
 # Editors and operating systems
 .idea/
