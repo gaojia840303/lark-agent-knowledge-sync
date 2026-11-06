@@ -38,6 +38,18 @@
 - 使用飞书项目来源时，需要已安装并登录的 `meegle` CLI。
 - 飞书应用或用户必须拥有目标文档、Base 和 Meegle 项目的最小必要权限。
 
+## 当前首轮试点
+
+当前不做生产自动运行，先并行完成：
+
+1. 用品牌人像判官独立测试 Bot 验证已绑定知识库的修改、新增、删除/撤权行为。
+2. 用 3—5 份明确提交的会议材料验证“范围校验—候选识别—人工审核—幂等”链路。
+
+统一入口：
+
+- [首轮双验证执行方案](docs/首轮双验证执行方案.md)
+- [测试 Agent 接入与交接清单](docs/测试Agent接入与交接清单.md)
+
 ## 快速开始
 
 将仓库放入 Codex 全局 Skill 目录：
@@ -52,7 +64,7 @@
 Copy-Item .\agent-sync.example.yaml .\agent-sync.yaml
 ```
 
-先填写 [项目契约](docs/项目契约.md)、[来源准入清单](references/source-manifest.md) 和 Agent 配置。知识库绑定行为验证可并行执行，但生产启用前必须形成结论；真实写入前必须完成上游采集范围与成本验证。
+先按 [首轮双验证执行方案](docs/首轮双验证执行方案.md) 确认测试 Bot、3—5 份样本和责任人，再填写 [项目契约](docs/项目契约.md)、[来源准入清单](references/source-manifest.md) 和 Agent 配置。首轮只手动运行并先做 `dry-run`，不启用生产调度或正式知识自动写入。
 
 验证并运行：
 
@@ -71,15 +83,17 @@ python scripts/sync.py apply --config .\agent-sync.yaml --proposal-id "<proposal
 
 完整配置与 MVP 步骤见：
 
-- [协作交接（Claude Cowork / WorkBuddy）](agent_handoff.md)
+- [协作交接与当前 Todo](agent_handoff.md)
+- [首轮双验证执行方案](docs/首轮双验证执行方案.md)
+- [测试 Agent 接入与交接清单](docs/测试Agent接入与交接清单.md)
 - [项目契约（当前上位基线）](docs/项目契约.md)
 - [Source Manifest 来源准入清单](references/source-manifest.md)
-- [单 Agent MVP 评测卡](docs/MVP评测卡.md)
-- [阶段工作汇报](docs/Agent自动更新能力周会工作汇报.md)
 - [知识库绑定行为验证](docs/知识库绑定行为验证.md)
 - [上游采集范围与成本验证](docs/采集范围与成本验证.md)
-- [配置说明](references/config-schema.md)
+- [单 Agent MVP 评测卡](docs/MVP评测卡.md)
 - [MVP 运行说明](docs/MVP运行说明.md)
+- [配置说明](references/config-schema.md)
+- [阶段工作汇报](docs/Agent自动更新能力周会工作汇报.md)
 - [关键知识维护与供给能力落地方案](docs/Agent自动更新能力落地方案.md)
 - [安全与审核规则](references/knowledge-policy.md)
 
